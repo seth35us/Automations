@@ -1,0 +1,11 @@
+.env
+.browser-profile/
+.edge-profile/
+.chrome-profile/
+.hybrid-edge-profile/
+.browser-mode
+.playwright-browsers/
+artifacts/
+*.log
+confirmed-reservations.json
+.node-bin

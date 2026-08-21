@@ -1,0 +1,5 @@
+.DS_Store
+.venv/
+.hybrid-edge-profile/
+node_modules/
+*.log

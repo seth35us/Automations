@@ -1,0 +1,12 @@
+{
+  "name": "chandler-racquetball-reservation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal Chandler racquetball reservation helper",
+  "dependencies": {
+    "playwright": "1.61.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

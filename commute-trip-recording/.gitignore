@@ -1,0 +1,7 @@
+.env
+.browser-profile/
+artifacts/
+*.log
+recorded-trips.json
+successful-runs.json
+run-history.json
