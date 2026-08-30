@@ -82,7 +82,7 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || (( n
   fi
 fi
 
-chmod +x "$PROJECT_DIR/setup-mac.sh" "$PROJECT_DIR/run-reservation.sh"
+chmod +x "$PROJECT_DIR/setup-mac.sh" "$PROJECT_DIR/run-reservation.sh" "$PROJECT_DIR/run-reservation-portable.sh"
 if ! "$PROJECT_DIR/setup-mac.sh"; then
   pause_and_exit 1
 fi

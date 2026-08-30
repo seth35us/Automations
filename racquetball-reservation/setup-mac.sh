@@ -140,7 +140,7 @@ umask 077
   fi
 } > "$PROJECT_DIR/.env"
 chmod 600 "$PROJECT_DIR/.env"
-chmod +x "$RUN_SCRIPT" "$PROJECT_DIR/setup-mac.sh"
+chmod +x "$RUN_SCRIPT" "$PROJECT_DIR/run-reservation-portable.sh" "$PROJECT_DIR/setup-mac.sh"
 
 xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
