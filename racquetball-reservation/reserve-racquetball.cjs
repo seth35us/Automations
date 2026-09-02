@@ -2,7 +2,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+const { execFile, execFileSync } = require("node:child_process");
+const { shouldResolveManualChallenge } = require("./manual-challenge-state");
 
 let chromium;
 let StealthPlugin;
@@ -23,6 +24,7 @@ let BROWSER_MODE = "playwright";
 let PROFILE_DIR = path.join(ROOT, ".edge-profile");
 const ARTIFACTS_DIR = path.join(ROOT, "artifacts");
 const RESERVATIONS_FILE = path.join(ROOT, "confirmed-reservations.json");
+const NOTIFICATION_HISTORY_FILE = path.join(ROOT, "notification-history.json");
 const BROWSER_MODE_FILE = path.join(ROOT, ".browser-mode");
 const HYBRID_PROFILE_DIR = path.join(ROOT, ".hybrid-edge-profile");
 const HYBRID_DEBUG_PORT = 9333;
@@ -33,11 +35,13 @@ let EVENT_NAME = "Seth";
 let COURTS = ["B", "A"];
 let ACCEPT_RENTAL_WAIVER = true;
 let RESERVATION_INITIALS = "s.s.";
+let NOTIFICATION_TARGET_DATE = "unknown date";
 const HUMAN_CHALLENGE_TIMEOUT_MS = 15 * 60 * 1000;
 const CAPSOLVER_API_URL = "https://api.capsolver.com";
 
 class DoNotRetryError extends Error { }
 class ExistingReservationError extends Error { }
+class SlotConflictError extends Error { }
 
 function loadEnv(filename) {
   if (!fs.existsSync(filename)) return;
@@ -148,16 +152,162 @@ async function solveCaptchaWithCapsolver(page) {
   return false;
 }
 
-function notifyHuman(message) {
+function sendMacNotification(message, kind) {
   const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  execFile(
-    "/usr/bin/osascript",
-    [
-      "-e",
-      `display notification "${escaped}" with title "Court reservation" sound name "Glass"`,
-    ],
-    () => { }
+  const sound = kind === "failure" ? "Basso" : "Glass";
+  return new Promise((resolve) => {
+    execFile(
+      "/usr/bin/osascript",
+      ["-e", `display notification "${escaped}" with title "Court reservation" sound name "${sound}"`],
+      (error) => {
+        if (error) log(`macOS notification failed: ${error.message}`);
+        resolve(!error);
+      }
+    );
+  });
+}
+
+function readNotificationHistory() {
+  if (!fs.existsSync(NOTIFICATION_HISTORY_FILE)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(NOTIFICATION_HISTORY_FILE, "utf8"));
+  } catch {
+    throw new Error(`${NOTIFICATION_HISTORY_FILE} is not valid JSON.`);
+  }
+}
+
+function recordNotification(entry) {
+  const history = readNotificationHistory();
+  history.push({ ...entry, recordedAt: new Date().toISOString() });
+  fs.writeFileSync(NOTIFICATION_HISTORY_FILE, `${JSON.stringify(history.slice(-100), null, 2)}\n`, {
+    mode: 0o600,
+  });
+}
+
+function notificationFingerprint(kind, date, message) {
+  return `${kind}:${date}:${message}`;
+}
+
+function recentlyEmailed(fingerprint) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  return readNotificationHistory().some(
+    (entry) => entry.fingerprint === fingerprint && entry.status === "sent" &&
+      (fingerprint.startsWith("success:") || Date.parse(entry.recordedAt) >= cutoff)
   );
+}
+
+function zeptoMailToken() {
+  const configured = (process.env.ZEPTOMAIL_SEND_MAIL_TOKEN || process.env.ZEPTOMAIL_API_KEY || "")
+    .replace(/^zoho-enczapikey\s+/i, "")
+    .trim();
+  if (configured) return configured;
+
+  const gcloud = process.env.GCLOUD_BIN || "/usr/local/share/google-cloud-sdk/bin/gcloud";
+  const project = process.env.ZEPTOMAIL_GCLOUD_PROJECT;
+  const secret = process.env.ZEPTOMAIL_SECRET_NAME;
+  if (!project || !secret) return "";
+  try {
+    return execFileSync(
+      gcloud,
+      ["secrets", "versions", "access", "latest", "--secret", secret, "--project", project],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 }
+    ).trim();
+  } catch (error) {
+    throw new Error(`Could not load the ZeptoMail token from Google Secret Manager: ${error.message}`);
+  }
+}
+
+function notificationEmailConfig() {
+  return {
+    from: (process.env.RACQUETBALL_NOTIFICATION_FROM || "").trim(),
+    fromName: (process.env.RACQUETBALL_NOTIFICATION_FROM_NAME || "Racquetball Reservations").trim(),
+    recipients: (process.env.RACQUETBALL_NOTIFICATION_EMAIL || "")
+      .split(",")
+      .map((email) => email.trim())
+      .filter(Boolean),
+  };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function sendZeptoMail({ subject, textBody }) {
+  const token = zeptoMailToken();
+  const { from, fromName, recipients } = notificationEmailConfig();
+  if (!token) throw new Error("ZeptoMail token is not configured.");
+  if (!from || recipients.length === 0) throw new Error("Notification sender or recipient is not configured.");
+
+  const payload = {
+    from: { address: from, name: fromName },
+    to: recipients.map((address) => ({ email_address: { address } })),
+    subject,
+    textbody: textBody,
+  };
+  const apiURL = process.env.ZEPTOMAIL_API_URL || "https://api.zeptomail.com/v1.1/email";
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(apiURL, {
+        method: "POST",
+        headers: {
+          Authorization: `Zoho-enczapikey ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) return;
+      const responseText = (await response.text()).slice(0, 500);
+      const error = new Error(`ZeptoMail returned ${response.status}: ${responseText}`);
+      error.retryable = response.status === 429 || response.status >= 500;
+      throw error;
+    } catch (error) {
+      lastError = error;
+      if (error.retryable === false || attempt === 3) break;
+      await delay(attempt * 2000);
+    }
+  }
+  throw lastError;
+}
+
+function notificationSubject(kind, date) {
+  if (kind === "success") return `✅ Racquetball reserved — ${date}`;
+  if (kind === "attention") return `⚠️ Racquetball reservation needs attention — ${date}`;
+  return `🚨 Racquetball reservation failed — ${date}`;
+}
+
+async function notifyHuman(message, { kind = "attention", date = NOTIFICATION_TARGET_DATE, screenshot, force = false } = {}) {
+  const fingerprint = notificationFingerprint(kind, date, message);
+  const macPromise = sendMacNotification(message, kind);
+  let emailSent = false;
+
+  if (!force && recentlyEmailed(fingerprint)) {
+    log(`Duplicate ${kind} email suppressed for ${date}.`);
+  } else {
+    const subject = notificationSubject(kind, date);
+    const lines = [
+      `Status: ${kind.toUpperCase()}`,
+      `Reservation date: ${date}`,
+      `Time: ${new Date().toLocaleString("en-US", { timeZone: TIME_ZONE })} (${TIME_ZONE})`,
+      "",
+      message,
+    ];
+    if (screenshot) lines.push("", `Failure screenshot: ${screenshot}`);
+    try {
+      await sendZeptoMail({ subject, textBody: lines.join("\n") });
+      recordNotification({ fingerprint, date, status: "sent", kind, subject });
+      log(`ZeptoMail ${kind} notification accepted for ${date}.`);
+      emailSent = true;
+    } catch (error) {
+      recordNotification({ fingerprint, date, status: "error", kind, message: error.message });
+      log(`ZeptoMail notification failed: ${error.message}`);
+    }
+  }
+
+  const macSent = await macPromise;
+  return { emailSent, macSent };
 }
 
 async function hybridEndpointReady() {
@@ -264,13 +414,14 @@ function recordConfirmation(date, description, receipt) {
 }
 
 function parseArgs(argv) {
-  const result = { dryRun: false, date: null, headed: false, scheduled: false };
+  const result = { dryRun: false, date: null, headed: false, scheduled: false, testNotification: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--headed") result.headed = true;
     else if (arg === "--scheduled") result.scheduled = true;
     else if (arg === "--date") result.date = argv[++index];
+    else if (arg === "--test-notification") result.testNotification = true;
     else if (arg === "--help") result.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -317,7 +468,7 @@ function scheduleFor(dateString) {
   const { weekday } = dateInfo(dateString);
   if (weekday === 0) return ["4:00 PM"];
   if (weekday === 2 || weekday === 4) return ["5:30 PM", "5:00 PM", "4:30 PM"];
-  if (weekday === 5) return ["5:30 PM"];
+  if (weekday === 5) return ["11:30 AM"];
   return null;
 }
 
@@ -356,14 +507,42 @@ async function waitForManualSignIn(page) {
   const message =
     "reCAPTCHA needs you. Open the visible reservation browser and complete sign-in within 15 minutes.";
   log(message);
-  notifyHuman(message);
+  await notifyHuman(message, { kind: "attention" });
   await page.bringToFront();
-  await page.waitForFunction(
-    () => !window.location.pathname.toLowerCase().includes("/signin"),
-    undefined,
-    { timeout: HUMAN_CHALLENGE_TIMEOUT_MS }
-  );
-  await page.waitForLoadState("domcontentloaded");
+
+  const deadline = Date.now() + HUMAN_CHALLENGE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const [url, emailFieldVisible, challengeVisible, quickReservationVisible, signInButtonVisible] = await Promise.all([
+      page.url(),
+      visible(page.getByRole("textbox", { name: /Email address Required/i })),
+      visible(page.locator('iframe[title*="recaptcha challenge" i]')),
+      visible(page.getByRole("heading", { name: "Quick reservation", exact: true })),
+      visible(page.getByRole("button", { name: "Sign in", exact: true })),
+    ]);
+
+    if (shouldResolveManualChallenge({
+      url,
+      emailFieldVisible,
+      challengeVisible,
+      quickReservationVisible,
+      signInButtonVisible,
+    })) {
+      await page.waitForLoadState("domcontentloaded").catch(() => { });
+      return;
+    }
+
+    if (challengeVisible) {
+      const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
+      if (solvedByCapsolver) {
+        await page.waitForTimeout(1500);
+        continue;
+      }
+    }
+
+    await delay(1000);
+  }
+
+  throw new Error("The manual reCAPTCHA challenge was not resolved within 15 minutes.");
 }
 
 async function signInIfNeeded(page, allowManualChallenge) {
@@ -525,14 +704,14 @@ async function slotAvailable(page, court, start) {
   };
 }
 
-async function chooseReservation(page, times) {
+async function chooseReservation(page, times, rejected = new Set()) {
   for (const start of times) {
     for (const court of COURTS) {
       const candidate = await slotAvailable(page, court, start);
-      if (!candidate.available) continue;
+      if (!candidate.available || rejected.has(candidate.description)) continue;
       await candidate.first.click();
       await candidate.second.click();
-      return candidate.description;
+      return candidate;
     }
   }
   return null;
@@ -545,25 +724,16 @@ async function waitForConfirmation(page, allowManualChallenge) {
 
   while (Date.now() < automaticDeadline) {
     if (page.url().includes("/quickreservation/checkout/confirmation")) return;
-    if ((await visible(serviceError)) || (await visible(challenge))) {
+    const serviceErrorVisible = await visible(serviceError);
+    const challengeVisible = serviceErrorVisible || (await visible(challenge));
+    if (challengeVisible) {
       const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
       if (solvedByCapsolver) {
         await page.waitForTimeout(1500);
         continue;
       }
-      if (!allowManualChallenge) {
-        throw new Error("reCAPTCHA verification failed and requires manual completion.");
-      }
-
-      const message =
-        "reCAPTCHA needs you. Use the visible browser to re-login and finish the reservation within 15 minutes.";
-      log(message);
-      notifyHuman(message);
-      await page.bringToFront();
-      await page.waitForURL(/\/quickreservation\/checkout\/confirmation/, {
-        timeout: HUMAN_CHALLENGE_TIMEOUT_MS,
-      });
-      return;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -572,7 +742,7 @@ async function waitForConfirmation(page, allowManualChallenge) {
     const message =
       "Reservation needs your attention. The visible browser will remain open for 15 minutes; re-login or finish the booking there.";
     log(message);
-    notifyHuman(message);
+    await notifyHuman(message, { kind: "attention" });
     await page.bringToFront();
     await page.waitForURL(/\/quickreservation\/checkout\/confirmation/, {
       timeout: HUMAN_CHALLENGE_TIMEOUT_MS,
@@ -593,11 +763,16 @@ async function finishReservation(page, allowManualChallenge) {
   const dailyReservationLimit = page.getByText(
     /At most 1 facility in this type can be reserved per day for each customer/i
   );
+  const slotConflict = page.getByText(/resource is unavailable at this time/i);
   const confirmOutcome = await waitForVisibleChoice([
     ["waiver", waiverHeading],
     ["reserve", zeroCostReserve],
     ["existing", dailyReservationLimit],
+    ["conflict", slotConflict],
   ]);
+  if (confirmOutcome === "conflict") {
+    throw new SlotConflictError("Chandler Online reports that the selected court became unavailable.");
+  }
   if (confirmOutcome === "existing") {
     throw new ExistingReservationError(
       "Chandler Online reports that this account already has a racquetball reservation for the target date."
@@ -626,7 +801,11 @@ async function finishReservation(page, allowManualChallenge) {
     const waiverOutcome = await waitForVisibleChoice([
       ["reserve", zeroCostReserve],
       ["existing", dailyReservationLimit],
+      ["conflict", slotConflict],
     ]);
+    if (waiverOutcome === "conflict") {
+      throw new SlotConflictError("Chandler Online reports that the selected court became unavailable.");
+    }
     if (waiverOutcome === "existing") {
       throw new ExistingReservationError(
         "Chandler Online reports that this account already has a racquetball reservation for the target date."
@@ -726,12 +905,22 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      "Usage: ./run-reservation.sh [--dry-run] [--headed] [--scheduled] [--date YYYY-MM-DD]"
+      "Usage: ./run-reservation.sh [--dry-run] [--headed] [--scheduled] [--date YYYY-MM-DD] [--test-notification]"
     );
+    return;
+  }
+  if (args.testNotification) {
+    const result = await notifyHuman("ZeptoMail and macOS notification delivery test passed.", {
+      kind: "success",
+      date: "notification test",
+      force: true,
+    });
+    if (!result.emailSent) throw new Error("The ZeptoMail test notification was not accepted.");
     return;
   }
 
   const targetDate = args.date || addDays(todayInArizona(), 2);
+  NOTIFICATION_TARGET_DATE = targetDate;
   const times = scheduleFor(targetDate);
   if (!times) {
     log(`${targetDate} is not Sunday, Tuesday, Thursday, or Friday; nothing to reserve.`);
@@ -740,9 +929,10 @@ async function main() {
 
   const priorConfirmation = confirmedReservations()[targetDate];
   if (priorConfirmation && !args.dryRun) {
-    log(
-      `${targetDate} is already recorded as confirmed: ${priorConfirmation.description}; ${priorConfirmation.receipt}`
-    );
+    const message = `Reservation confirmed for ${priorConfirmation.description}. ${priorConfirmation.receipt}`;
+    const fingerprint = notificationFingerprint("success", targetDate, message);
+    if (!recentlyEmailed(fingerprint)) await notifyHuman(message, { kind: "success", date: targetDate });
+    log(`${targetDate} is already recorded as confirmed: ${priorConfirmation.description}; ${priorConfirmation.receipt}`);
     return;
   }
 
@@ -765,29 +955,52 @@ async function main() {
     await selectDate(page, targetDate);
     await page.getByRole("textbox", { name: "Event name", exact: true }).fill(EVENT_NAME);
 
-    const chosen = await chooseReservation(page, times);
-    if (!chosen) {
-      throw new DoNotRetryError(
-        "No complete one-hour slot was available for any configured court/time fallback."
-      );
-    }
-    log(`Selected ${chosen}.`);
+    const rejected = new Set();
+    while (true) {
+      const chosen = await chooseReservation(page, times, rejected);
+      if (!chosen) {
+        throw new DoNotRetryError(
+          "No complete one-hour slot was available for any configured court/time fallback."
+        );
+      }
+      log(`Selected ${chosen.description}.`);
 
-    if (args.dryRun) {
-      log("Dry run complete; no reservation was submitted.");
-      return;
-    }
+      if (args.dryRun) {
+        log("Dry run complete; no reservation was submitted.");
+        return;
+      }
 
-    submissionStarted = true;
-    const receipt = await finishReservation(page, args.headed);
-    recordConfirmation(targetDate, chosen, receipt);
-    log(`Reservation confirmed for ${chosen}. ${receipt}`);
+      submissionStarted = true;
+      try {
+        const receipt = await finishReservation(page, args.headed);
+        recordConfirmation(targetDate, chosen.description, receipt);
+        log(`Reservation confirmed for ${chosen.description}. ${receipt}`);
+        await notifyHuman(`Reservation confirmed for ${chosen.description}. ${receipt}`, {
+          kind: "success",
+          date: targetDate,
+        });
+        break;
+      } catch (error) {
+        if (!(error instanceof SlotConflictError)) throw error;
+        rejected.add(chosen.description);
+        submissionStarted = false;
+        log(`${chosen.description} became unavailable; continuing to the next configured fallback.`);
+        await page.goto(RESERVATION_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.getByRole("heading", { name: "Quick reservation", exact: true }).waitFor({ timeout: 20000 });
+        await selectDate(page, targetDate);
+        await page.getByRole("textbox", { name: "Event name", exact: true }).fill(EVENT_NAME);
+      }
+    }
   } catch (error) {
     if (error instanceof ExistingReservationError) {
       const description = "Existing Chandler racquetball reservation (court and time not returned)";
       const receipt = "Confirmed by Chandler's one-facility-per-day reservation limit";
       recordConfirmation(targetDate, description, receipt);
       log(`${error.message} Recorded locally to prevent a duplicate attempt.`);
+      await notifyHuman(`Reservation confirmed: ${description}. ${receipt}`, {
+        kind: "success",
+        date: targetDate,
+      });
       return;
     }
 
@@ -806,12 +1019,30 @@ async function main() {
     } else {
       process.exitCode = 1;
     }
+    const attempt = Number(process.env.RESERVATION_ATTEMPT || 0);
+    const maxAttempts = Number(process.env.RESERVATION_MAX_ATTEMPTS || 0);
+    if (process.exitCode === 2 || !maxAttempts || attempt >= maxAttempts) {
+      await notifyHuman(`Racquetball reservation failed: ${error.message}`, {
+        kind: "failure",
+        date: targetDate,
+        screenshot,
+      });
+      error.notificationAttempted = true;
+    }
   } finally {
     await cleanup();
   }
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
+  const attempt = Number(process.env.RESERVATION_ATTEMPT || 0);
+  const maxAttempts = Number(process.env.RESERVATION_MAX_ATTEMPTS || 0);
+  if (!error.notificationAttempted && (!maxAttempts || attempt >= maxAttempts)) {
+    await notifyHuman(`Racquetball automation failed before reservation processing started: ${error.message}`, {
+      kind: "failure",
+      date: NOTIFICATION_TARGET_DATE,
+    }).catch(() => { });
+  }
   log(`FATAL: ${error.message}`);
   process.exitCode = 1;
 });

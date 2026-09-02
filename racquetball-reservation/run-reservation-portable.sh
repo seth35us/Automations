@@ -4,16 +4,20 @@ set -u
 
 PROJECT_DIR="${0:A:h}"
 
-if [[ -f "$PROJECT_DIR/.node-bin" ]]; then
-  NODE_BIN="$(<"$PROJECT_DIR/.node-bin")"
-else
-  NODE_BIN="$(command -v node 2>/dev/null || true)"
-fi
-
-if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
-  echo "Node.js is not installed or is not available in PATH." >&2
+BUNDLED_NODE="$PROJECT_DIR/runtime/node/bin/node"
+if [[ ! -f "$BUNDLED_NODE" || -L "$BUNDLED_NODE" || ! -x "$BUNDLED_NODE" ]]; then
+  echo "The bundled Node runtime is missing or invalid. Run ./setup-mac.sh to reinstall it." >&2
   exit 1
 fi
+
+NODE_BIN="$BUNDLED_NODE"
+NODE_MAJOR="$("$NODE_BIN" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if (( NODE_MAJOR < 20 )); then
+  echo "The bundled Node runtime is too old. Run ./setup-mac.sh to reinstall it." >&2
+  exit 1
+fi
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 cd "$PROJECT_DIR"
 
@@ -30,7 +34,8 @@ for delay in "${retry_delays[@]}"; do
     sleep "$delay"
   fi
 
-  "$NODE_BIN" "$PROJECT_DIR/reserve-racquetball.cjs" "$@"
+  RESERVATION_ATTEMPT="$attempt" RESERVATION_MAX_ATTEMPTS="${#retry_delays[@]}" \
+    "$NODE_BIN" "$PROJECT_DIR/reserve-racquetball.cjs" "$@"
   exit_code=$?
   if (( exit_code == 0 )); then
     exit 0

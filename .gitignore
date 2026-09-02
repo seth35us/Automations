@@ -3,3 +3,5 @@
 .hybrid-edge-profile/
 node_modules/
 *.log
+commute-trip-recording/.env.example
+commute-trip-recording/.env.example

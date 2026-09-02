@@ -8,4 +8,6 @@
 artifacts/
 *.log
 confirmed-reservations.json
+notification-history.json
 .node-bin
+runtime/

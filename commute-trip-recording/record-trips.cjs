@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+const { execFile, execFileSync } = require("node:child_process");
 const { chromium } = require("playwright");
 
 const ROOT = __dirname;
@@ -12,6 +12,7 @@ const ARTIFACTS_DIR = path.join(ROOT, "artifacts");
 const EXCEPTIONS_FILE = path.join(ROOT, "exceptions.json");
 const SUCCESS_FILE = path.join(ROOT, "successful-runs.json");
 const HISTORY_FILE = path.join(ROOT, "run-history.json");
+const NOTIFICATION_HISTORY_FILE = path.join(ROOT, "notification-history.json");
 const SITE_URL = "https://members.commutewithenterprise.com/#/trip-recording";
 const TIME_ZONE = "America/Phoenix";
 const MEMBER_NAME = "Seth Starr";
@@ -65,17 +66,149 @@ function recordHistory(entry) {
   writeJson(HISTORY_FILE, history.slice(-100));
 }
 
-function notify(message, success) {
+function sendMacNotification(message, success) {
   const safe = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  execFile(
-    "/usr/bin/osascript",
-    ["-e", `display notification "${safe}" with title "Commute trip recording" sound name "${success ? "Glass" : "Basso"}"`],
-    () => {}
+  return new Promise((resolve) => {
+    execFile(
+      "/usr/bin/osascript",
+      ["-e", `display notification "${safe}" with title "Commute trip recording" sound name "${success ? "Glass" : "Basso"}"`],
+      (error) => {
+        if (error) log(`macOS notification failed: ${error.message}`);
+        resolve(!error);
+      }
+    );
+  });
+}
+
+function zeptoMailToken() {
+  const configured = (process.env.ZEPTOMAIL_SEND_MAIL_TOKEN || process.env.ZEPTOMAIL_API_KEY || "")
+    .replace(/^zoho-enczapikey\s+/i, "")
+    .trim();
+  if (configured) return configured;
+
+  const gcloud = process.env.GCLOUD_BIN || "/usr/local/share/google-cloud-sdk/bin/gcloud";
+  const project = process.env.ZEPTOMAIL_GCLOUD_PROJECT;
+  const secret = process.env.ZEPTOMAIL_SECRET_NAME;
+  if (!project || !secret) return "";
+  try {
+    return execFileSync(
+      gcloud,
+      ["secrets", "versions", "access", "latest", "--secret", secret, "--project", project],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 }
+    ).trim();
+  } catch (error) {
+    throw new Error(`Could not load the ZeptoMail token from Google Secret Manager: ${error.message}`);
+  }
+}
+
+function notificationEmailConfig() {
+  return {
+    from: (process.env.COMMUTE_NOTIFICATION_FROM || "").trim(),
+    fromName: (process.env.COMMUTE_NOTIFICATION_FROM_NAME || "Commute Trip Recording").trim(),
+    recipients: (process.env.COMMUTE_NOTIFICATION_EMAIL || "")
+      .split(",")
+      .map((email) => email.trim())
+      .filter(Boolean),
+  };
+}
+
+function notificationFingerprint(success, month, message) {
+  return `${success ? "success" : "failure"}:${month || "unknown"}:${message}`;
+}
+
+function recentlyEmailed(fingerprint) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  return readJson(NOTIFICATION_HISTORY_FILE, []).some(
+    (entry) => entry.fingerprint === fingerprint && entry.status === "sent" &&
+      (fingerprint.startsWith("success:") || Date.parse(entry.recordedAt) >= cutoff)
   );
 }
 
+function recordNotification(entry) {
+  const history = readJson(NOTIFICATION_HISTORY_FILE, []);
+  history.push({ ...entry, recordedAt: new Date().toISOString() });
+  writeJson(NOTIFICATION_HISTORY_FILE, history.slice(-100));
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function sendZeptoMail({ subject, textBody }) {
+  const token = zeptoMailToken();
+  const { from, fromName, recipients } = notificationEmailConfig();
+  if (!token) throw new Error("ZeptoMail token is not configured.");
+  if (!from || recipients.length === 0) throw new Error("Notification sender or recipient is not configured.");
+
+  const payload = {
+    from: { address: from, name: fromName },
+    to: recipients.map((address) => ({ email_address: { address } })),
+    subject,
+    textbody: textBody,
+  };
+  const apiURL = process.env.ZEPTOMAIL_API_URL || "https://api.zeptomail.com/v1.1/email";
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(apiURL, {
+        method: "POST",
+        headers: {
+          Authorization: `Zoho-enczapikey ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) return;
+      const responseText = (await response.text()).slice(0, 500);
+      const error = new Error(`ZeptoMail returned ${response.status}: ${responseText}`);
+      error.retryable = response.status === 429 || response.status >= 500;
+      throw error;
+    } catch (error) {
+      lastError = error;
+      if (error.retryable === false || attempt === 3) break;
+      await delay(attempt * 2000);
+    }
+  }
+  throw lastError;
+}
+
+async function notify(message, success, details = {}) {
+  const month = details.month || "unknown month";
+  const fingerprint = notificationFingerprint(success, month, message);
+  const macPromise = sendMacNotification(message, success);
+  let emailSent = false;
+
+  if (!details.force && recentlyEmailed(fingerprint)) {
+    log(`Duplicate ${success ? "success" : "failure"} email suppressed for ${month}.`);
+  } else {
+    const subject = `${success ? "✅" : "🚨"} Commute recording ${success ? "approved" : "failed"} — ${month}`;
+    const lines = [
+      `Status: ${success ? "APPROVED" : "FAILED"}`,
+      `Month: ${month}`,
+      `Time: ${new Date().toLocaleString("en-US", { timeZone: TIME_ZONE })} (${TIME_ZONE})`,
+      "",
+      message,
+    ];
+    if (details.screenshot) lines.push("", `Failure screenshot: ${details.screenshot}`);
+    try {
+      await sendZeptoMail({ subject, textBody: lines.join("\n") });
+      recordNotification({ fingerprint, month, status: "sent", success, subject });
+      log(`ZeptoMail ${success ? "success" : "failure"} notification accepted for ${month}.`);
+      emailSent = true;
+    } catch (error) {
+      recordNotification({ fingerprint, month, status: "error", success, message: error.message });
+      log(`ZeptoMail notification failed: ${error.message}`);
+    }
+  }
+
+  const macSent = await macPromise;
+  return { emailSent, macSent };
+}
+
 function parseArgs(argv) {
-  const result = { dryRun: true, headed: false, keepOpen: false, scheduled: false, targetMonth: null };
+  const result = { dryRun: true, headed: false, keepOpen: false, scheduled: false, targetMonth: null, testNotification: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") result.dryRun = true;
@@ -84,6 +217,7 @@ function parseArgs(argv) {
     else if (arg === "--headed") result.headed = true;
     else if (arg === "--keep-open") { result.keepOpen = true; result.headed = true; }
     else if (arg === "--target-month") result.targetMonth = argv[++index];
+    else if (arg === "--test-notification") result.testNotification = true;
     else if (arg === "--help") result.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -205,6 +339,16 @@ async function dismissPopups(page) {
   if (await visible(closeCookies)) await closeCookies.first().click();
 }
 
+async function returnToVanpoolTrips(page, target) {
+  const vanpoolTrips = page.getByRole("link", { name: "Vanpool Trips", exact: true });
+  await vanpoolTrips.waitFor({ state: "visible", timeout: 20000 });
+  await vanpoolTrips.click();
+  await page.waitForURL(/#\/trip-recording$/, { timeout: 20000 });
+  await page.getByRole("button", { name: "Save", exact: true }).waitFor({ state: "visible", timeout: 20000 });
+  await page.getByRole("button", { name: "Approve", exact: true }).waitFor({ state: "visible", timeout: 20000 });
+  await selectTargetMonth(page, target);
+}
+
 async function selectTargetMonth(page, target) {
   const monthName = MONTH_NAMES[target.month - 1];
   const button = page.getByRole("button", {
@@ -319,15 +463,12 @@ async function processTrips(page, target, exceptions, dryRun) {
   if (dryRun) return { changed, approved: false };
   const save = page.getByRole("button", { name: "Save", exact: true });
   await save.click();
-  await page.locator(".trip-status.saved").first().waitFor({ state: "visible", timeout: 15000 });
 
   const approve = page.getByRole("button", { name: "Approve", exact: true });
-  if (await visible(approve)) {
-    await approve.click();
-    const confirmApproval = page.getByRole("button", { name: "Yes, Approve", exact: true });
-    await confirmApproval.waitFor({ state: "visible", timeout: 10000 });
-    await confirmApproval.click();
-  }
+  await approve.click({ timeout: 20000 });
+  const confirmApproval = page.getByRole("button", { name: "Yes, Approve", exact: true });
+  await confirmApproval.waitFor({ state: "visible", timeout: 10000 });
+  await confirmApproval.click();
   await page.waitForFunction(
     () => {
       const button = document.querySelector("button.approve");
@@ -423,7 +564,15 @@ async function run() {
   loadEnv(ENV_FILE);
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log("Usage: ./run-trip-recording.sh [--dry-run|--run|--scheduled] [--headed] [--keep-open] [--target-month YYYY-MM]");
+    console.log("Usage: ./run-trip-recording.sh [--dry-run|--run|--scheduled] [--headed] [--keep-open] [--target-month YYYY-MM] [--test-notification]");
+    return;
+  }
+  if (args.testNotification) {
+    const result = await notify("ZeptoMail and macOS notification delivery test passed.", true, {
+      month: "notification test",
+      force: true,
+    });
+    if (!result.emailSent) throw new Error("The ZeptoMail test notification was not accepted.");
     return;
   }
   const today = zonedParts();
@@ -435,6 +584,11 @@ async function run() {
   const target = parseMonthKey(args.targetMonth || previousMonthKey());
   const successes = readJson(SUCCESS_FILE, {});
   if (!args.dryRun && successes[target.key]) {
+    const successMessage = `Success: ${target.key} trips and gas were recorded and approved.`;
+    const fingerprint = notificationFingerprint(true, target.key, successMessage);
+    if (!recentlyEmailed(fingerprint)) {
+      await notify(successMessage, true, { month: target.key });
+    }
     log(`${target.key} already completed successfully at ${successes[target.key].completedAt}; skipping.`);
     return;
   }
@@ -455,9 +609,7 @@ async function run() {
     await selectTargetMonth(page, target);
     const exceptions = exceptionDates(target.key);
     const expense = await processExpense(page, target, args.dryRun);
-    await page.getByRole("link", { name: "Vanpool Trips", exact: true }).click();
-    await page.waitForURL(/#\/trip-recording$/, { timeout: 20000 });
-    await selectTargetMonth(page, target);
+    await returnToVanpoolTrips(page, target);
     const trips = await processTrips(page, target, exceptions, args.dryRun);
 
     if (args.dryRun) {
@@ -482,19 +634,25 @@ async function run() {
     writeJson(SUCCESS_FILE, successes);
     recordHistory({ month: target.key, status: "success", ...result });
     log(`Successfully recorded gas, saved trips, and approved ${target.key}.`);
-    notify(`Success: ${target.key} trips and gas were recorded and approved.`, true);
+    await notify(`Success: ${target.key} trips and gas were recorded and approved.`, true, { month: target.key });
   } catch (error) {
     const screenshot = path.join(ARTIFACTS_DIR, `failure-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
     await page.screenshot({ path: screenshot, fullPage: true }).catch(() => {});
     recordHistory({ month: target.key, status: "error", message: error.message, screenshot });
-    notify(`Failed for ${target.key}: ${error.message}`, false);
+    await notify(`Failed for ${target.key}: ${error.message}`, false, { month: target.key, screenshot });
+    error.notificationAttempted = true;
     throw error;
   } finally {
     await context.close();
   }
 }
 
-run().catch((error) => {
+run().catch(async (error) => {
+  if (!error.notificationAttempted) {
+    await notify(`The commute automation failed before trip processing started: ${error.message}`, false, {
+      month: previousMonthKey(),
+    }).catch(() => {});
+  }
   console.error(`[${new Date().toISOString()}] ${error.stack || error.message}`);
   process.exitCode = 1;
 });

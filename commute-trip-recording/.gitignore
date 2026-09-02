@@ -5,3 +5,4 @@ artifacts/
 recorded-trips.json
 successful-runs.json
 run-history.json
+notification-history.json

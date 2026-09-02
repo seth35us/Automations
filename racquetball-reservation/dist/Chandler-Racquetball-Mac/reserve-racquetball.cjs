@@ -5,10 +5,11 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { chromium } = require("playwright-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { shouldResolveManualChallenge } = require("./manual-challenge-state");
 
 const ROOT = __dirname;
 const ENV_FILE = path.join(ROOT, ".env");
-let BROWSER_CHANNEL = "msedge";
+let BROWSER_CHANNEL = "chromium";
 let BROWSER_MODE = "playwright";
 let PROFILE_DIR = path.join(ROOT, ".edge-profile");
 const ARTIFACTS_DIR = path.join(ROOT, "artifacts");
@@ -348,12 +349,40 @@ async function waitForManualSignIn(page) {
   log(message);
   notifyHuman(message);
   await page.bringToFront();
-  await page.waitForFunction(
-    () => !window.location.pathname.toLowerCase().includes("/signin"),
-    undefined,
-    { timeout: HUMAN_CHALLENGE_TIMEOUT_MS }
-  );
-  await page.waitForLoadState("domcontentloaded");
+
+  const deadline = Date.now() + HUMAN_CHALLENGE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const [url, emailFieldVisible, challengeVisible, quickReservationVisible, signInButtonVisible] = await Promise.all([
+      page.url(),
+      visible(page.getByRole("textbox", { name: /Email address Required/i })),
+      visible(page.locator('iframe[title*="recaptcha challenge" i]')),
+      visible(page.getByRole("heading", { name: "Quick reservation", exact: true })),
+      visible(page.getByRole("button", { name: "Sign in", exact: true })),
+    ]);
+
+    if (shouldResolveManualChallenge({
+      url,
+      emailFieldVisible,
+      challengeVisible,
+      quickReservationVisible,
+      signInButtonVisible,
+    })) {
+      await page.waitForLoadState("domcontentloaded").catch(() => { });
+      return;
+    }
+
+    if (challengeVisible) {
+      const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
+      if (solvedByCapsolver) {
+        await page.waitForTimeout(1500);
+        continue;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error("The manual reCAPTCHA challenge was not resolved within 15 minutes.");
 }
 
 async function signInIfNeeded(page, allowManualChallenge) {
@@ -488,25 +517,16 @@ async function waitForConfirmation(page, allowManualChallenge) {
 
   while (Date.now() < automaticDeadline) {
     if (page.url().includes("/quickreservation/checkout/confirmation")) return;
-    if ((await visible(serviceError)) || (await visible(challenge))) {
+    const serviceErrorVisible = await visible(serviceError);
+    const challengeVisible = serviceErrorVisible || (await visible(challenge));
+    if (challengeVisible) {
       const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
       if (solvedByCapsolver) {
         await page.waitForTimeout(1500);
         continue;
       }
-      if (!allowManualChallenge) {
-        throw new Error("reCAPTCHA verification failed and requires manual completion.");
-      }
-
-      const message =
-        "reCAPTCHA needs you. Use the visible browser to re-login and finish the reservation within 15 minutes.";
-      log(message);
-      notifyHuman(message);
-      await page.bringToFront();
-      await page.waitForURL(/\/quickreservation\/checkout\/confirmation/, {
-        timeout: HUMAN_CHALLENGE_TIMEOUT_MS,
-      });
-      return;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

@@ -15,7 +15,7 @@ https://members.commutewithenterprise.com/#/
 - Submits expenses, saves trips, and approves the month.
 - Records successes in `successful-runs.json` and all attempts in
   `run-history.json`.
-- Sends a macOS notification on success or failure.
+- Sends a persistent ZeptoMail email and a macOS notification on success or failure.
 
 The LaunchAgent runs at 8:00 AM on days 1 through 10. After a successful month,
 later attempts are skipped. If the Mac is off, a later scheduled day provides
@@ -70,3 +70,10 @@ Use `--target-month YYYY-MM` only for troubleshooting a specific prior month.
 
 Scheduled output is written to `trip-recording.log` and
 `trip-recording-error.log`. Failure screenshots are saved in `artifacts/`.
+ZeptoMail delivery attempts are recorded in `notification-history.json`.
+
+Test both notification channels without changing trip data:
+
+```sh
+./run-trip-recording.sh --test-notification
+```

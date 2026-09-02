@@ -2,10 +2,23 @@
 
 set -u
 
-PROJECT_DIR="/Users/sethstarr/Projects/Automations"
-NODE_BIN="/Users/sethstarr/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
-export NODE_PATH="/Users/sethstarr/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules"
-export PLAYWRIGHT_BROWSERS_PATH="$PROJECT_DIR/.playwright-browsers"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+BUNDLED_NODE="$PROJECT_DIR/runtime/node/bin/node"
+if [[ ! -f "$BUNDLED_NODE" || -L "$BUNDLED_NODE" || ! -x "$BUNDLED_NODE" ]]; then
+  echo "The bundled Node runtime is missing or invalid. Run ./setup-mac.sh to reinstall it." >&2
+  exit 1
+fi
+
+NODE_BIN="$BUNDLED_NODE"
+NODE_MAJOR="$("$NODE_BIN" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+if (( NODE_MAJOR < 20 )); then
+  echo "The bundled Node runtime is too old. Run ./setup-mac.sh to reinstall it." >&2
+  exit 1
+fi
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PLAYWRIGHT_BROWSERS_PATH="$PROJECT_DIR/runtime/playwright-browsers"
 
 cd "$PROJECT_DIR"
 

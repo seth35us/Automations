@@ -29,58 +29,100 @@ if [[ ! -f "$PROJECT_DIR/package.json" ]]; then
 fi
 
 echo "Installing the local Playwright dependency..."
+mkdir -p "$PROJECT_DIR/runtime/node/bin" "$PROJECT_DIR/runtime/playwright-browsers"
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 npm install --omit=dev
-printf '%s\n' "$(command -v node)" > "$PROJECT_DIR/.node-bin"
+npm install --package-lock-only --omit=dev >/dev/null 2>&1 || true
+
+echo "Installing the verified project-local Node.js runtime..."
+bundled_node_version="v24.19.0"
+case "$(uname -m)" in
+  arm64) bundled_node_arch="arm64" ;;
+  x86_64) bundled_node_arch="x64" ;;
+  *) echo "Unsupported Mac architecture: $(uname -m)"; exit 1 ;;
+esac
+bundled_node_archive="node-${bundled_node_version}-darwin-${bundled_node_arch}.tar.gz"
+bundled_node_url="https://nodejs.org/dist/${bundled_node_version}/${bundled_node_archive}"
+bundled_node_temp="$(mktemp -d)"
+trap 'rm -rf "$bundled_node_temp"' EXIT
+curl -fsSL "https://nodejs.org/dist/${bundled_node_version}/SHASUMS256.txt" -o "$bundled_node_temp/SHASUMS256.txt"
+curl -fsSL "$bundled_node_url" -o "$bundled_node_temp/$bundled_node_archive"
+expected_sha="$(awk -v archive="$bundled_node_archive" '$2 == archive { print $1 }' "$bundled_node_temp/SHASUMS256.txt")"
+actual_sha="$(shasum -a 256 "$bundled_node_temp/$bundled_node_archive" | awk '{ print $1 }')"
+if [[ -z "$expected_sha" || "$actual_sha" != "$expected_sha" ]]; then
+  echo "Node.js checksum verification failed."
+  exit 1
+fi
+tar -xzf "$bundled_node_temp/$bundled_node_archive" -C "$bundled_node_temp"
+rm -f "$PROJECT_DIR/runtime/node/bin/node"
+install -m 755 "$bundled_node_temp/node-${bundled_node_version}-darwin-${bundled_node_arch}/bin/node" "$PROJECT_DIR/runtime/node/bin/node"
+cp "$bundled_node_temp/node-${bundled_node_version}-darwin-${bundled_node_arch}/LICENSE" "$PROJECT_DIR/runtime/node/LICENSE"
+printf '%s\n' "$bundled_node_version" > "$PROJECT_DIR/runtime/node/VERSION"
+trap - EXIT
+rm -rf "$bundled_node_temp"
+printf '%s\n' "$PROJECT_DIR/runtime/node/bin/node" > "$PROJECT_DIR/.node-bin"
 chmod 600 "$PROJECT_DIR/.node-bin"
+
+echo "Installing Playwright's bundled Chromium browser into the project runtime..."
+export PLAYWRIGHT_BROWSERS_PATH="$PROJECT_DIR/runtime/playwright-browsers"
+npx playwright install chromium >/dev/null 2>&1 || true
 
 echo
 echo "Choose the browser this automation should use:"
-echo "  1) Microsoft Edge"
-echo "  2) Google Chrome"
+echo "  1) Playwright Chromium (bundled with the project)"
+echo "  2) Microsoft Edge"
+echo "  3) Google Chrome"
 read "browser_choice?Browser [1]: "
 case "${browser_choice:-1}" in
-  1|edge|Edge)
+  1|chromium|Chromium)
+    browser_channel="chromium"
+    browser_name="Playwright Chromium"
+    browser_executable=""
+    browser_download_url=""
+    ;;
+  2|edge|Edge)
     browser_channel="msedge"
     browser_name="Microsoft Edge"
     browser_executable="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
     browser_download_url="https://www.microsoft.com/edge"
     ;;
-  2|chrome|Chrome)
+  3|chrome|Chrome)
     browser_channel="chrome"
     browser_name="Google Chrome"
     browser_executable="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     browser_download_url="https://www.google.com/chrome/"
     ;;
   *)
-    echo "Choose 1 for Edge or 2 for Chrome. Safari is not supported by this automation."
+    echo "Choose 1 for Playwright Chromium, 2 for Edge, or 3 for Chrome."
     exit 1
     ;;
 esac
 
-if [[ ! -x "$browser_executable" ]]; then
-  echo "$browser_name is not installed in /Applications."
-  if command -v brew >/dev/null 2>&1; then
-    read "install_browser?Install $browser_name automatically now? [Y/n]: "
-    if [[ "${install_browser:-y}" == [yY] || "${install_browser:-y}" == [yY][eE][sS] ]]; then
-      if [[ "$browser_channel" == "msedge" ]]; then
-        brew install --cask microsoft-edge
+if [[ -n "$browser_executable" ]]; then
+  if [[ ! -x "$browser_executable" ]]; then
+    echo "$browser_name is not installed in /Applications."
+    if command -v brew >/dev/null 2>&1; then
+      read "install_browser?Install $browser_name automatically now? [Y/n]: "
+      if [[ "${install_browser:-y}" == [yY] || "${install_browser:-y}" == [yY][eE][sS] ]]; then
+        if [[ "$browser_channel" == "msedge" ]]; then
+          brew install --cask microsoft-edge
+        else
+          brew install --cask google-chrome
+        fi
       else
-        brew install --cask google-chrome
+        echo "Install it from $browser_download_url and run this setup again."
+        exit 1
       fi
     else
       echo "Install it from $browser_download_url and run this setup again."
       exit 1
     fi
-  else
-    echo "Install it from $browser_download_url and run this setup again."
+  fi
+
+  if [[ ! -x "$browser_executable" ]]; then
+    echo "$browser_name installation could not be verified."
     exit 1
   fi
-fi
-
-if [[ ! -x "$browser_executable" ]]; then
-  echo "$browser_name installation could not be verified."
-  exit 1
 fi
 
 echo

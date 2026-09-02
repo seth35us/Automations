@@ -2,6 +2,8 @@
 
 The local installation runs in hybrid Microsoft Edge mode. macOS opens the normal Edge application with a dedicated profile stored in `.hybrid-edge-profile/`, and Playwright attaches over a localhost-only connection. This keeps the reservation session separate from your personal Edge profile while leaving the visible browser open for human verification and receipt review.
 
+The installer downloads Node.js 24 LTS directly from Node.js, verifies its SHA-256 checksum, and installs a real project-local binary under `runtime/node/`. Scheduled runs refuse system Node installations and symlinks, preventing PATH changes or an obsolete global Node version from breaking reservations.
+
 Runs every day at 5:00 AM in `America/Phoenix`, waits five seconds for the inventory window to open, and looks two days ahead. Chandler does not permit these reservations to be finalized before 5:00 AM on the opening day. It only acts when the target date is:
 
 The Mac is configured with a repeating macOS power event to wake at 4:58 AM every day so the LaunchAgent can start on time.
@@ -9,7 +11,7 @@ The Mac is configured with a repeating macOS power event to wake at 4:58 AM ever
 - Sunday: 4:00–5:00 PM
 - Tuesday: 5:30–6:30 PM, then 5:00–6:00 PM, then 4:30–5:30 PM
 - Thursday: 5:30–6:30 PM, then 5:00–6:00 PM, then 4:30–5:30 PM
-- Friday: 5:30–6:30 PM
+- Friday: 11:30 AM–12:30 PM
 
 For each time it tries Court B first, then Court A. The event name is `Seth`. A candidate is used only when both consecutive 30-minute blocks are available.
 
@@ -33,9 +35,15 @@ Run the normal two-days-ahead reservation immediately:
 ./run-reservation.sh
 ```
 
-The scheduled job writes to `racquetball.log` and `racquetball-error.log`. Failure screenshots are saved under `artifacts/`.
+The scheduled job writes to `racquetball.log` and `racquetball-error.log`. Failure screenshots are saved under `artifacts/`. Successful reservations, final failures, and human-attention requests send both a persistent ZeptoMail email and a macOS notification. ZeptoMail attempts are recorded in `notification-history.json`.
 
-For a temporary browser, network, or sign-in failure before submission, the job retries after 10, 30, and 60 seconds. It does not retry when no configured slot is available or after the Reserve flow has started, because a retry at that point could create a duplicate. A final failure generates a macOS notification.
+For a temporary browser, network, or sign-in failure before submission, the job retries after 10, 30, and 60 seconds. It does not retry when no configured slot is available or after the Reserve flow has started, because a retry at that point could create a duplicate. Only the final failed attempt sends an email, preventing duplicate alerts during retries.
+
+Test both notification channels without making a reservation:
+
+```sh
+./run-reservation.sh --test-notification
+```
 
 Browser transitions use page-state waits rather than arbitrary sleeps: completed sign-in, vanished loading overlays, refreshed court cells, waiver or limit responses, enabled checkout controls, reCAPTCHA errors, and completed receipt headings. The only deliberate timing delays are the five-second inventory-opening grace period and bounded pre-submission retry backoff.
 

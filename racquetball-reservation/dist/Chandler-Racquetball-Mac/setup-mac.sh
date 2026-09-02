@@ -29,9 +29,36 @@ if [[ ! -f "$PROJECT_DIR/package.json" ]]; then
 fi
 
 echo "Installing the local Playwright dependency..."
+mkdir -p "$PROJECT_DIR/runtime/node/bin"
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 npm install --omit=dev
-printf '%s\n' "$(command -v node)" > "$PROJECT_DIR/.node-bin"
+
+echo "Installing the verified project-local Node.js runtime..."
+bundled_node_version="v24.19.0"
+case "$(uname -m)" in
+  arm64) bundled_node_arch="arm64" ;;
+  x86_64) bundled_node_arch="x64" ;;
+  *) echo "Unsupported Mac architecture: $(uname -m)"; exit 1 ;;
+esac
+bundled_node_archive="node-${bundled_node_version}-darwin-${bundled_node_arch}.tar.gz"
+bundled_node_temp="$(mktemp -d)"
+trap 'rm -rf "$bundled_node_temp"' EXIT
+curl -fsSL "https://nodejs.org/dist/${bundled_node_version}/SHASUMS256.txt" -o "$bundled_node_temp/SHASUMS256.txt"
+curl -fsSL "https://nodejs.org/dist/${bundled_node_version}/${bundled_node_archive}" -o "$bundled_node_temp/$bundled_node_archive"
+expected_sha="$(awk -v archive="$bundled_node_archive" '$2 == archive { print $1 }' "$bundled_node_temp/SHASUMS256.txt")"
+actual_sha="$(shasum -a 256 "$bundled_node_temp/$bundled_node_archive" | awk '{ print $1 }')"
+if [[ -z "$expected_sha" || "$actual_sha" != "$expected_sha" ]]; then
+  echo "Node.js checksum verification failed."
+  exit 1
+fi
+tar -xzf "$bundled_node_temp/$bundled_node_archive" -C "$bundled_node_temp"
+rm -f "$PROJECT_DIR/runtime/node/bin/node"
+install -m 755 "$bundled_node_temp/node-${bundled_node_version}-darwin-${bundled_node_arch}/bin/node" "$PROJECT_DIR/runtime/node/bin/node"
+cp "$bundled_node_temp/node-${bundled_node_version}-darwin-${bundled_node_arch}/LICENSE" "$PROJECT_DIR/runtime/node/LICENSE"
+printf '%s\n' "$bundled_node_version" > "$PROJECT_DIR/runtime/node/VERSION"
+trap - EXIT
+rm -rf "$bundled_node_temp"
+printf '%s\n' "$PROJECT_DIR/runtime/node/bin/node" > "$PROJECT_DIR/.node-bin"
 chmod 600 "$PROJECT_DIR/.node-bin"
 
 echo
