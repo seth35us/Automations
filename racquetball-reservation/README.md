@@ -11,7 +11,7 @@ The Mac is configured with a repeating macOS power event to wake at 4:58 AM ever
 - Sunday: 4:00–5:00 PM
 - Tuesday: 5:30–6:30 PM, then 5:00–6:00 PM, then 4:30–5:30 PM
 - Thursday: 5:30–6:30 PM, then 5:00–6:00 PM, then 4:30–5:30 PM
-- Friday: 11:30 AM–12:30 PM
+- Friday: 5:30–6:30 PM
 
 For each time it tries Court B first, then Court A. The event name is `Seth`. A candidate is used only when both consecutive 30-minute blocks are available.
 
@@ -33,6 +33,18 @@ Run the normal two-days-ahead reservation immediately:
 
 ```sh
 ./run-reservation.sh
+```
+
+Override the default booking time for one run without changing the regular schedule:
+
+```sh
+./run-reservation.sh --dry-run --date 2026-09-05 --time 8:00 AM
+```
+
+For a simple natural-language entry point, you can also invoke the wrapper:
+
+```sh
+./ask-reservation.cjs --dry-run --date 2026-09-05 --time 8:00 AM "reserve a court for Saturday at 8"
 ```
 
 The scheduled job writes to `racquetball.log` and `racquetball-error.log`. Failure screenshots are saved under `artifacts/`. Successful reservations, final failures, and human-attention requests send both a persistent ZeptoMail email and a macOS notification. ZeptoMail attempts are recorded in `notification-history.json`.

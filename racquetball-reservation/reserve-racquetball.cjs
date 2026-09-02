@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFile, execFileSync } = require("node:child_process");
 const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge, runCaptchaRetryBudget } = require("./manual-challenge-state");
+const { scheduleFor, normalizeTimeValue } = require("./reservation-scheduling");
 
 let chromium;
 let StealthPlugin;
@@ -415,13 +416,21 @@ function recordConfirmation(date, description, receipt) {
 }
 
 function parseArgs(argv) {
-  const result = { dryRun: false, date: null, headed: false, scheduled: false, testNotification: false };
+  const result = {
+    dryRun: false,
+    date: null,
+    headed: false,
+    scheduled: false,
+    testNotification: false,
+    time: null,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") result.dryRun = true;
     else if (arg === "--headed") result.headed = true;
     else if (arg === "--scheduled") result.scheduled = true;
     else if (arg === "--date") result.date = argv[++index];
+    else if (arg === "--time") result.time = argv[++index];
     else if (arg === "--test-notification") result.testNotification = true;
     else if (arg === "--help") result.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
@@ -463,14 +472,6 @@ function dateInfo(dateString) {
       year: "numeric",
     }).format(date),
   };
-}
-
-function scheduleFor(dateString) {
-  const { weekday } = dateInfo(dateString);
-  if (weekday === 0) return ["4:00 PM"];
-  if (weekday === 2 || weekday === 4) return ["5:30 PM", "5:00 PM", "4:30 PM"];
-  if (weekday === 5) return ["11:30 AM"];
-  return null;
 }
 
 function minutesFrom12Hour(value) {
@@ -924,7 +925,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      "Usage: ./run-reservation.sh [--dry-run] [--headed] [--scheduled] [--date YYYY-MM-DD] [--test-notification]"
+      "Usage: ./run-reservation.sh [--dry-run] [--headed] [--scheduled] [--date YYYY-MM-DD] [--time HH:MM AM/PM] [--test-notification]"
     );
     return;
   }
@@ -940,7 +941,8 @@ async function main() {
 
   const targetDate = args.date || addDays(todayInArizona(), 2);
   NOTIFICATION_TARGET_DATE = targetDate;
-  const times = scheduleFor(targetDate);
+  const requestedTime = normalizeTimeValue(args.time);
+  const times = scheduleFor(targetDate, requestedTime);
   if (!times) {
     log(`${targetDate} is not Sunday, Tuesday, Thursday, or Friday; nothing to reserve.`);
     return;
