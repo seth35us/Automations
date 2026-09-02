@@ -13,4 +13,8 @@ function shouldResolveManualChallenge({
     return false;
 }
 
-module.exports = { shouldResolveManualChallenge };
+function shouldRetryCaptchaChallenge({ attempt = 0, maxAttempts = 3 } = {}) {
+    return attempt < maxAttempts;
+}
+
+module.exports = { shouldResolveManualChallenge, shouldRetryCaptchaChallenge };

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { shouldResolveManualChallenge } = require("../manual-challenge-state");
+const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge } = require("../manual-challenge-state");
 
 test("resolves when the reservation page becomes visible", () => {
     assert.equal(
@@ -21,4 +21,9 @@ test("waits while sign-in inputs and reCAPTCHA remain visible", () => {
         }),
         false
     );
+});
+test("stops retrying captcha after the configured limit", () => {
+    assert.equal(shouldRetryCaptchaChallenge({ attempt: 0, maxAttempts: 3 }), true);
+    assert.equal(shouldRetryCaptchaChallenge({ attempt: 2, maxAttempts: 3 }), true);
+    assert.equal(shouldRetryCaptchaChallenge({ attempt: 3, maxAttempts: 3 }), false);
 });
