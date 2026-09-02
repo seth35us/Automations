@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile, execFileSync } = require("node:child_process");
-const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge } = require("./manual-challenge-state");
+const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge, runCaptchaRetryBudget } = require("./manual-challenge-state");
 
 let chromium;
 let StealthPlugin;
@@ -512,7 +512,6 @@ async function waitForManualSignIn(page) {
   await page.bringToFront();
 
   const deadline = Date.now() + HUMAN_CHALLENGE_TIMEOUT_MS;
-  let captchaAttempts = 0;
   while (Date.now() < deadline) {
     const [url, emailFieldVisible, challengeVisible, quickReservationVisible, signInButtonVisible] = await Promise.all([
       page.url(),
@@ -533,11 +532,19 @@ async function waitForManualSignIn(page) {
       return;
     }
 
-    if (challengeVisible && shouldRetryCaptchaChallenge({ attempt: captchaAttempts, maxAttempts: CAPTCHA_RETRY_LIMIT })) {
-      captchaAttempts += 1;
-      const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
-      if (solvedByCapsolver) {
-        await page.waitForTimeout(1500);
+    if (challengeVisible) {
+      const captchaBudget = await runCaptchaRetryBudget({
+        maxAttempts: CAPTCHA_RETRY_LIMIT,
+        attemptFn: async () => {
+          const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
+          if (solvedByCapsolver) {
+            await page.waitForTimeout(1500);
+            return true;
+          }
+          return false;
+        },
+      });
+      if (captchaBudget.resolved) {
         continue;
       }
     }
@@ -725,16 +732,23 @@ async function waitForConfirmation(page, allowManualChallenge) {
   const challenge = page.locator('iframe[title*="recaptcha challenge" i]');
   const automaticDeadline = Date.now() + 20000;
 
-  let captchaAttempts = 0;
   while (Date.now() < automaticDeadline) {
     if (page.url().includes("/quickreservation/checkout/confirmation")) return;
     const serviceErrorVisible = await visible(serviceError);
     const challengeVisible = serviceErrorVisible || (await visible(challenge));
-    if (challengeVisible && shouldRetryCaptchaChallenge({ attempt: captchaAttempts, maxAttempts: CAPTCHA_RETRY_LIMIT })) {
-      captchaAttempts += 1;
-      const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
-      if (solvedByCapsolver) {
-        await page.waitForTimeout(1500);
+    if (challengeVisible) {
+      const captchaBudget = await runCaptchaRetryBudget({
+        maxAttempts: CAPTCHA_RETRY_LIMIT,
+        attemptFn: async () => {
+          const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
+          if (solvedByCapsolver) {
+            await page.waitForTimeout(1500);
+            return true;
+          }
+          return false;
+        },
+      });
+      if (captchaBudget.resolved) {
         continue;
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
