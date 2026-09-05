@@ -6,6 +6,7 @@ const { execFile } = require("node:child_process");
 const { chromium } = require("playwright-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge, runCaptchaRetryBudget } = require("./manual-challenge-state");
+const { extractCaptchaSiteKey } = require("./captcha-solver");
 
 const ROOT = __dirname;
 const ENV_FILE = path.join(ROOT, ".env");
@@ -59,27 +60,62 @@ async function solveCaptchaWithCapsolver(page) {
   const apiKey = process.env.CAPSOLVER_API_KEY;
   if (!enabled || !apiKey) return false;
 
-  const challengeFrame = page.locator(
-    'iframe[title*="recaptcha challenge" i], iframe[title*="recaptcha" i], iframe[src*="google.com/recaptcha"]'
-  );
+  const selectors = [
+    'iframe[title*="recaptcha challenge" i]',
+    'iframe[title*="recaptcha" i]',
+    'iframe[src*="google.com/recaptcha"]',
+    'iframe[src*="recaptcha/api2"]',
+    'iframe[src*="recaptcha/enterprise"]',
+  ];
+  const challengeFrame = page.locator(selectors.join(", "));
   if (!(await visible(challengeFrame))) return false;
 
-  const details = await page.evaluate(() => {
-    const frame = document.querySelector(
-      'iframe[title*="recaptcha challenge" i], iframe[title*="recaptcha" i], iframe[src*="google.com/recaptcha"]'
-    );
-    const src = frame?.getAttribute("src") || "";
-    const params = new URLSearchParams(src.split("?")[1] || "");
-    const siteKey = params.get("k") || params.get("sitekey") || "";
+  const details = await page.evaluate((selectorList) => {
+    // 1. Traverse iframes to find Google ReCAPTCHA iframe source
+    const frames = Array.from(document.querySelectorAll("iframe"));
+    let src = "";
+    for (const frame of frames) {
+      const s = frame.getAttribute("src") || "";
+      if (
+        s.includes("google.com/recaptcha") ||
+        s.includes("recaptcha/api2") ||
+        s.includes("recaptcha/enterprise")
+      ) {
+        src = s;
+        break;
+      }
+    }
+
+    // 2. Select any containers containing data-sitekey
+    let dataSiteKey = "";
+    const container = document.querySelector("[data-sitekey]");
+    if (container) {
+      dataSiteKey = container.getAttribute("data-sitekey") || "";
+    }
+
+    const frame = document.querySelector(selectorList);
+    const fallbackSrc = frame?.getAttribute("src") || "";
+    const fallbackDataSiteKey = frame?.getAttribute("data-sitekey") || "";
+    const siteKey = (window.__captchaSiteKey || "") || "";
+
     return {
       pageUrl: window.location.href,
-      siteKey,
+      siteKey: siteKey || (src ? new URLSearchParams(src.split("?")[1] || "").get("k") || new URLSearchParams(src.split("?")[1] || "").get("sitekey") || "" : ""),
+      frameSrc: src || fallbackSrc,
+      dataSiteKey: dataSiteKey || fallbackDataSiteKey,
     };
-  });
+  }, selectors[0]);
 
-  if (!details.siteKey) return false;
+  const siteKey = extractCaptchaSiteKey({ frameSrc: details.frameSrc, dataSiteKey: details.dataSiteKey });
+  if (!siteKey) {
+    log("CapSolver skipped: no reCAPTCHA site key was detected in the visible frame or body.");
+    return false;
+  }
 
-  log(`Attempting CapSolver solve for reCAPTCHA on ${details.pageUrl}`);
+  const isEnterprise = details.frameSrc.toLowerCase().includes("/recaptcha/enterprise/") || page.url().toLowerCase().includes("enterprise");
+  const taskType = isEnterprise ? "ReCaptchaV2EnterpriseTaskProxyLess" : "ReCaptchaV2TaskProxyLess";
+
+  log(`Attempting CapSolver solve for ${isEnterprise ? 'reCAPTCHA Enterprise' : 'reCAPTCHA V2'} on ${details.pageUrl} with site key ${siteKey}`);
   try {
     const createTaskResponse = await fetch(`${CAPSOLVER_API_URL}/createTask`, {
       method: "POST",
@@ -87,9 +123,9 @@ async function solveCaptchaWithCapsolver(page) {
       body: JSON.stringify({
         clientKey: apiKey,
         task: {
-          type: "ReCaptchaV2TaskProxyLess",
+          type: taskType,
           websiteURL: details.pageUrl,
-          websiteKey: details.siteKey,
+          websiteKey: siteKey,
         },
       }),
     });
@@ -100,20 +136,33 @@ async function solveCaptchaWithCapsolver(page) {
     }
 
     const taskId = createTask.taskId;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    // Poll for the result up to 45 attempts (up to 90 seconds total)
+    for (let attempt = 0; attempt < 45; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      const taskResultResponse = await fetch(`${CAPSOLVER_API_URL}/getTaskResult`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientKey: apiKey, taskId }),
-      });
-      const taskResult = await taskResultResponse.json();
+
+      let taskResult;
+      try {
+        const taskResultResponse = await fetch(`${CAPSOLVER_API_URL}/getTaskResult`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientKey: apiKey, taskId }),
+        });
+        taskResult = await taskResultResponse.json();
+      } catch (err) {
+        log(`CapSolver status fetch error: ${err.message}. Retrying...`);
+        continue;
+      }
+
       if (taskResult.status === "ready" && taskResult.solution?.gRecaptchaResponse) {
         const token = taskResult.solution.gRecaptchaResponse;
-        await page.evaluate((captchaToken) => {
+
+        const callbackInvoked = await page.evaluate((captchaToken) => {
+          // A. Fill standard reCAPTCHA answer form fields
           const targets = [
-            document.querySelector('textarea[name="g-recaptcha-response"]'),
-            document.querySelector('input[name="g-recaptcha-response"]'),
+            document.querySelector("#g-recaptcha-response"),
+            document.querySelector('[name="g-recaptcha-response"]'),
+            ...Array.from(document.querySelectorAll('textarea[id^="g-recaptcha-response"]')),
+            ...Array.from(document.querySelectorAll('input[name="g-recaptcha-response"]')),
           ];
           for (const target of targets) {
             if (!target) continue;
@@ -121,20 +170,84 @@ async function solveCaptchaWithCapsolver(page) {
             target.dispatchEvent(new Event("input", { bubbles: true }));
             target.dispatchEvent(new Event("change", { bubbles: true }));
           }
-          const submitButton = document.querySelector('button[type="submit"], input[type="submit"]');
-          if (submitButton) {
-            (submitButton).dispatchEvent(new Event("click", { bubbles: true }));
+
+          let ranCallback = false;
+          try {
+            // B. Traverse ___grecaptcha_cfg to trigger the internal form callback
+            if (window.___grecaptcha_cfg && window.___grecaptcha_cfg.clients) {
+              const clients = window.___grecaptcha_cfg.clients;
+              for (const key of Object.keys(clients)) {
+                const client = clients[key];
+
+                const traverseAndRun = (obj, depth = 0) => {
+                  if (!obj || depth > 10) return false;
+                  for (const k of Object.keys(obj)) {
+                    try {
+                      if (typeof obj[k] === "function") {
+                        if (k === "callback" || k === "promise-callback" || obj[k].name === "callback") {
+                          obj[k](captchaToken);
+                          ranCallback = true;
+                          return true;
+                        }
+                      } else if (typeof obj[k] === "object") {
+                        if (traverseAndRun(obj[k], depth + 1)) return true;
+                      }
+                    } catch (e) {
+                      // ignore cross-origin property security blocks
+                    }
+                  }
+                  return false;
+                };
+                if (traverseAndRun(client)) break;
+              }
+            }
+          } catch (error) {
+            console.error("Error executing grecaptcha callback:", error);
           }
+
+          // C. Fallback for data-callback attributes
+          if (!ranCallback) {
+            const elements = document.querySelectorAll("[data-callback]");
+            for (const el of elements) {
+              const cbName = el.getAttribute("data-callback");
+              if (cbName && typeof window[cbName] === "function") {
+                try {
+                  window[cbName](captchaToken);
+                  ranCallback = true;
+                } catch (e) {
+                  console.error("Error executing data-callback:", e);
+                }
+              }
+            }
+          }
+
+          return ranCallback;
         }, token);
+
+        if (!callbackInvoked) {
+          log("No dynamic reCAPTCHA callback found; falling back to direct submit trigger.");
+          await page.evaluate(() => {
+            const submitButton = document.querySelector('button[type="submit"], input[type="submit"], button[id*="signin" i], button[class*="signin" i]');
+            if (submitButton) {
+              submitButton.dispatchEvent(new Event("click", { bubbles: true }));
+              submitButton.click();
+            } else {
+              const form = document.querySelector("form");
+              if (form) form.submit();
+            }
+          });
+        }
+
         await page.waitForTimeout(1500);
         return true;
       }
+
       if (taskResult.status === "failed" || taskResult.status === "error") {
         throw new Error(taskResult?.errorDescription || "CapSolver task failed.");
       }
     }
   } catch (error) {
-    log(`CapSolver failed: ${error.message}`);
+    log(`CapSolver failed to solve reCAPTCHA: ${error.message}`);
   }
 
   return false;

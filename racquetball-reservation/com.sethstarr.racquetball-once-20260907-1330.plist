@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sethstarr.racquetball-once-20260907-1330</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sethstarr/Projects/Automations/racquetball-reservation/run-once-2026-09-07-1330.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sethstarr/Projects/Automations/racquetball-reservation</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Month</key><integer>9</integer>
+    <key>Day</key><integer>5</integer>
+    <key>Hour</key><integer>5</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/sethstarr/Projects/Automations/racquetball-reservation/racquetball-once-2026-09-07-1330.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sethstarr/Projects/Automations/racquetball-reservation/racquetball-once-2026-09-07-1330-error.log</string>
+</dict>
+</plist>
