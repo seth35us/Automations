@@ -41,6 +41,13 @@ let NOTIFICATION_TARGET_DATE = "unknown date";
 const HUMAN_CHALLENGE_TIMEOUT_MS = 15 * 60 * 1000;
 const CAPSOLVER_API_URL = "https://api.capsolver.com";
 const CAPTCHA_RETRY_LIMIT = 3;
+const RECAPTCHA_SELECTOR = [
+  'iframe[title*="recaptcha challenge" i]',
+  'iframe[title*="recaptcha" i]',
+  'iframe[src*="google.com/recaptcha"]',
+  'iframe[src*="recaptcha/api2"]',
+  'iframe[src*="recaptcha/enterprise"]',
+].join(", ");
 
 class DoNotRetryError extends Error { }
 class ExistingReservationError extends Error { }
@@ -74,14 +81,7 @@ async function solveCaptchaWithCapsolver(page) {
   const apiKey = process.env.CAPSOLVER_API_KEY;
   if (!enabled || !apiKey) return false;
 
-  const selectors = [
-    'iframe[title*="recaptcha challenge" i]',
-    'iframe[title*="recaptcha" i]',
-    'iframe[src*="google.com/recaptcha"]',
-    'iframe[src*="recaptcha/api2"]',
-    'iframe[src*="recaptcha/enterprise"]',
-  ];
-  const challengeFrame = page.locator(selectors.join(", "));
+  const challengeFrame = page.locator(RECAPTCHA_SELECTOR);
   if (!(await visible(challengeFrame))) return false;
 
   const details = await page.evaluate((selectorList) => {
@@ -118,7 +118,7 @@ async function solveCaptchaWithCapsolver(page) {
       frameSrc: src || fallbackSrc,
       dataSiteKey: dataSiteKey || fallbackDataSiteKey,
     };
-  }, selectors[0]);
+  }, 'iframe[title*="recaptcha challenge" i]');
 
   const siteKey = extractCaptchaSiteKey({ frameSrc: details.frameSrc, dataSiteKey: details.dataSiteKey });
   if (!siteKey) {
@@ -630,7 +630,7 @@ async function waitForManualSignIn(page) {
     const [url, emailFieldVisible, challengeVisible, quickReservationVisible, signInButtonVisible] = await Promise.all([
       page.url(),
       visible(page.getByRole("textbox", { name: /Email address Required/i })),
-      visible(page.locator('iframe[title*="recaptcha challenge" i]')),
+      visible(page.locator(RECAPTCHA_SELECTOR)),
       visible(page.getByRole("heading", { name: "Quick reservation", exact: true })),
       visible(page.getByRole("button", { name: "Sign in", exact: true })),
     ]);
@@ -699,7 +699,7 @@ async function signInIfNeeded(page, allowManualChallenge) {
     .getByRole("button", { name: "Sign in", exact: true })
     .click({ force: true });
 
-  const challenge = page.locator('iframe[title*="recaptcha challenge" i]');
+  const challenge = page.locator(RECAPTCHA_SELECTOR);
   const signInDeadline = Date.now() + 15000;
   while (Date.now() < signInDeadline) {
     if (await visible(challenge)) break;
@@ -843,7 +843,7 @@ async function chooseReservation(page, times, rejected = new Set()) {
 
 async function waitForConfirmation(page, allowManualChallenge) {
   const serviceError = page.getByText(/reCAPTCHA verification failed, please re-login/i);
-  const challenge = page.locator('iframe[title*="recaptcha challenge" i]');
+  const challenge = page.locator(RECAPTCHA_SELECTOR);
   const automaticDeadline = Date.now() + 20000;
 
   while (Date.now() < automaticDeadline) {
