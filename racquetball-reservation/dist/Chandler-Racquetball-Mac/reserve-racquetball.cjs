@@ -528,31 +528,47 @@ async function signInIfNeeded(page, allowManualChallenge) {
   await page.locator('input[type="password"]').fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
+  const challengePopup = page.locator('iframe[title*="recaptcha challenge" i]');
   const challenge = page.locator(RECAPTCHA_SELECTOR);
-  const signInDeadline = Date.now() + 15000;
+  const signInDeadline = Date.now() + 10000; // 10 seconds grace period for silent sign-in
   while (Date.now() < signInDeadline) {
-    if (await visible(challenge)) break;
     if (!page.url().toLowerCase().includes("/signin") && !(await visible(emailField))) {
-      return;
+      return; // Redirected successfully!
+    }
+    if (await visible(challengePopup)) {
+      break; // Real picture challenge popped up, solve it immediately
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
   if (await visible(challenge)) {
-    const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
-    if (solvedByCapsolver) {
-      await page.waitForTimeout(1500);
-      await page.getByRole("button", { name: "Sign in", exact: true }).click({ force: true });
-      const challengeResolvedDeadline = Date.now() + 15000;
-      while (Date.now() < challengeResolvedDeadline) {
-        if (!page.url().toLowerCase().includes("/signin") && !(await visible(emailField))) {
-          return;
+    const captchaBudget = await runCaptchaRetryBudget({
+      maxAttempts: CAPTCHA_RETRY_LIMIT,
+      attemptFn: async () => {
+        const solvedByCapsolver = await solveCaptchaWithCapsolver(page);
+        if (solvedByCapsolver) {
+          await page.waitForTimeout(1500);
+          await page.getByRole("button", { name: "Sign in", exact: true }).click({ force: true });
+          const challengeResolvedDeadline = Date.now() + 15000;
+          while (Date.now() < challengeResolvedDeadline) {
+            if (!page.url().toLowerCase().includes("/signin") && !(await visible(emailField))) {
+              return true;
+            }
+            if (!(await visible(challengePopup) || await visible(challenge))) break;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          if (!page.url().toLowerCase().includes("/signin") && !(await visible(emailField))) {
+            return true;
+          }
         }
-        if (!(await visible(challenge))) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      return;
+        return false;
+      },
+    });
+
+    if (captchaBudget.resolved) {
+      return; // Successfully resolved and signed in!
     }
+
     if (!allowManualChallenge) {
       throw new Error(
         "A reCAPTCHA challenge requires manual sign-in. Run ./run-reservation.sh --headed and sign in."
@@ -635,14 +651,19 @@ async function chooseReservation(page, times) {
 
 async function waitForConfirmation(page, allowManualChallenge) {
   const serviceError = page.getByText(/reCAPTCHA verification failed, please re-login/i);
+  const challengePopup = page.locator('iframe[title*="recaptcha challenge" i]');
   const challenge = page.locator(RECAPTCHA_SELECTOR);
-  const automaticDeadline = Date.now() + 20000;
+  const automaticDeadline = Date.now() + 45000;
+  const gracePeriodDeadline = Date.now() + 10000; // 10 seconds grace period for silent processing
 
   while (Date.now() < automaticDeadline) {
     if (page.url().includes("/quickreservation/checkout/confirmation")) return;
+
     const serviceErrorVisible = await visible(serviceError);
-    const challengeVisible = serviceErrorVisible || (await visible(challenge));
-    if (challengeVisible) {
+    const challengePopupVisible = await visible(challengePopup);
+    const hasWaitedOrPopup = (Date.now() >= gracePeriodDeadline) || challengePopupVisible || serviceErrorVisible;
+
+    if (hasWaitedOrPopup && (serviceErrorVisible || (await visible(challenge)))) {
       const captchaBudget = await runCaptchaRetryBudget({
         maxAttempts: CAPTCHA_RETRY_LIMIT,
         attemptFn: async () => {
