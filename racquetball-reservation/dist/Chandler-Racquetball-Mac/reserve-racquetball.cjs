@@ -923,6 +923,15 @@ async function main() {
       process.exitCode = 1;
     }
   } finally {
+    const attempt = Number(process.env.RESERVATION_ATTEMPT || 0);
+    const maxAttempts = Number(process.env.RESERVATION_MAX_ATTEMPTS || 0);
+    const isFinalFailure = process.exitCode === 2 || !maxAttempts || attempt >= maxAttempts;
+
+    if (args.headed && isFinalFailure && (process.exitCode || 0) > 0) {
+      log("Headed run final failure. Leaving the browser open so you can inspect or complete manually.");
+      log("Press Ctrl+C in the terminal or wait 15 minutes before the script ends and closes the browser...");
+      await new Promise((resolve) => setTimeout(resolve, HUMAN_CHALLENGE_TIMEOUT_MS));
+    }
     await cleanup();
   }
 }
