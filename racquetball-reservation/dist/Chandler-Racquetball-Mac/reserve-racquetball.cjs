@@ -6,7 +6,7 @@ const { execFile } = require("node:child_process");
 const { chromium } = require("playwright-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge, runCaptchaRetryBudget } = require("./manual-challenge-state");
-const { extractCaptchaSiteKey } = require("./captcha-solver");
+const { extractCaptchaSiteKey, buildCapSolverTask } = require("./captcha-solver");
 
 const ROOT = __dirname;
 const ENV_FILE = path.join(ROOT, ".env");
@@ -122,11 +122,13 @@ async function solveCaptchaWithCapsolver(page) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clientKey: apiKey,
-        task: {
+        task: buildCapSolverTask({
+          pageUrl: details.pageUrl,
+          siteKey,
+          isEnterprise: isEnterprise,
           type: taskType,
-          websiteURL: details.pageUrl,
-          websiteKey: siteKey,
-        },
+          isInvisible: true,
+        }),
       }),
     });
 

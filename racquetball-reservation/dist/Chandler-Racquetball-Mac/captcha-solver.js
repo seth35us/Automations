@@ -11,4 +11,23 @@ function extractCaptchaSiteKey({ frameSrc = "", dataSiteKey = "" } = {}) {
     return dataSiteKey.trim() || null;
 }
 
-module.exports = { extractCaptchaSiteKey };
+function buildCapSolverTask({
+    pageUrl = "",
+    siteKey = "",
+    isEnterprise = false,
+    isInvisible = true,
+    type = null,
+} = {}) {
+    if (!pageUrl || !siteKey) {
+        throw new Error("CapSolver task requires both a page URL and site key.");
+    }
+
+    return {
+        type: type || (isEnterprise ? "ReCaptchaV2EnterpriseTaskProxyLess" : "ReCaptchaV2TaskProxyLess"),
+        websiteURL: pageUrl,
+        websiteKey: siteKey,
+        isInvisible: Boolean(isInvisible),
+    };
+}
+
+module.exports = { extractCaptchaSiteKey, buildCapSolverTask };

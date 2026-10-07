@@ -22,7 +22,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 cd "$PROJECT_DIR"
 
 if [[ " $* " == *" --scheduled "* ]]; then
-  sleep 5
+  "$NODE_BIN" "$PROJECT_DIR/booking-opening.js" || exit 1
 fi
 
 retry_delays=(0 10 30 60)

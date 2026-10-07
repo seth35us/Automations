@@ -4,7 +4,7 @@ The local installation runs in hybrid Microsoft Edge mode. macOS opens the norma
 
 The installer downloads Node.js 24 LTS directly from Node.js, verifies its SHA-256 checksum, and installs a real project-local binary under `runtime/node/`. Scheduled runs refuse system Node installations and symlinks, preventing PATH changes or an obsolete global Node version from breaking reservations.
 
-Runs every day at 5:00 AM in `America/Phoenix`, waits five seconds for the inventory window to open, and looks two days ahead. Chandler does not permit these reservations to be finalized before 5:00 AM on the opening day. It only acts when the target date is:
+The LaunchAgent requests a daily 5:00 AM run in the Mac's local timezone. Scheduled runs independently check `America/Phoenix` and wait until 5:00:05 AM Arizona time before opening the browser, even if macOS triggers the job early after a timezone change. Runs after that time proceed immediately. The job looks two days ahead. Chandler does not permit these reservations to be finalized before 5:00 AM on the opening day. It only acts when the target date is:
 
 The Mac is configured with a repeating macOS power event to wake at 4:58 AM every day so the LaunchAgent can start on time.
 

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { extractCaptchaSiteKey } = require("../captcha-solver");
+const { extractCaptchaSiteKey, buildCapSolverTask } = require("../captcha-solver");
 
 test("extractCaptchaSiteKey reads a site key from a recaptcha iframe URL", () => {
     const siteKey = extractCaptchaSiteKey({
@@ -24,4 +24,19 @@ test("extractCaptchaSiteKey returns null when no site key is available", () => {
     });
 
     assert.equal(siteKey, null);
+});
+
+test("buildCapSolverTask includes the invisible reCAPTCHA flag for enterprise sites", () => {
+    const task = buildCapSolverTask({
+        pageUrl: "https://example.com/signin",
+        siteKey: "demo-site-key",
+        isEnterprise: true,
+    });
+
+    assert.deepEqual(task, {
+        type: "ReCaptchaV2EnterpriseTaskProxyLess",
+        websiteURL: "https://example.com/signin",
+        websiteKey: "demo-site-key",
+        isInvisible: true,
+    });
 });

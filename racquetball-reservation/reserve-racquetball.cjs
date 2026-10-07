@@ -5,7 +5,7 @@ const path = require("node:path");
 const { execFile, execFileSync } = require("node:child_process");
 const { shouldResolveManualChallenge, shouldRetryCaptchaChallenge, runCaptchaRetryBudget } = require("./manual-challenge-state");
 const { scheduleFor, normalizeTimeValue } = require("./reservation-scheduling");
-const { extractCaptchaSiteKey } = require("./captcha-solver");
+const { extractCaptchaSiteKey, buildCapSolverTask } = require("./captcha-solver");
 
 let chromium;
 let StealthPlugin;
@@ -136,11 +136,13 @@ async function solveCaptchaWithCapsolver(page) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clientKey: apiKey,
-        task: {
+        task: buildCapSolverTask({
+          pageUrl: details.pageUrl,
+          siteKey,
+          isEnterprise: isEnterprise,
           type: taskType,
-          websiteURL: details.pageUrl,
-          websiteKey: siteKey,
-        },
+          isInvisible: true,
+        }),
       }),
     });
 
