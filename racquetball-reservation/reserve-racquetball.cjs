@@ -767,6 +767,8 @@ async function selectDate(page, dateString) {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   ];
+  // Bring hybrid Edge's tab forward before the click's rendering/stability checks.
+  await page.bringToFront();
   await page.getByRole("combobox", { name: "Date picker, current date", exact: true }).click();
   const calendar = page.locator('[data-qa-id="popupCalendar"]');
   await calendar.waitFor({ state: "visible", timeout: 5000 });
